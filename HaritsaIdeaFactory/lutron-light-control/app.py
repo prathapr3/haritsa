@@ -16,24 +16,6 @@ CERTS_DIR = Path(__file__).parent / "certs"
 BRIGHTNESS_LEVELS = [100, 75, 50, 25, 0]
 
 
-def get_current_ssid():
-    try:
-        result = subprocess.run(
-            [
-                "/System/Library/PrivateFrameworks/Apple80211.framework/Resources/airport",
-                "-I",
-            ],
-            capture_output=True,
-            text=True,
-        )
-        for line in result.stdout.splitlines():
-            if " SSID:" in line:
-                return line.split("SSID:")[1].strip()
-    except Exception:
-        pass
-    return None
-
-
 def is_bridge_reachable():
     try:
         result = subprocess.run(
@@ -46,17 +28,61 @@ def is_bridge_reachable():
         return False
 
 
+class BridgeThread(threading.Thread):
+    """Runs the asyncio event loop persistently so the bridge stays connected."""
+
+    def __init__(self):
+        super().__init__(daemon=True)
+        self.loop = asyncio.new_event_loop()
+        self.bridge = None
+
+    def run(self):
+        asyncio.set_event_loop(self.loop)
+        self.loop.run_forever()
+
+    def submit(self, coro):
+        future = asyncio.run_coroutine_threadsafe(coro, self.loop)
+        return future.result(timeout=15)
+
+    async def _connect(self):
+        self.bridge = Smartbridge.create_tls(
+            BRIDGE_HOST,
+            str(CERTS_DIR / "caseta.key"),
+            str(CERTS_DIR / "caseta.crt"),
+            str(CERTS_DIR / "caseta-bridge.crt"),
+        )
+        await self.bridge.connect()
+
+    def connect(self):
+        self.submit(self._connect())
+
+    def get_devices(self):
+        return self.bridge.get_devices()
+
+    def turn_on(self, device_id):
+        self.submit(self.bridge.turn_on(device_id))
+
+    def turn_off(self, device_id):
+        self.submit(self.bridge.turn_off(device_id))
+
+    def set_value(self, device_id, value):
+        self.submit(self.bridge.set_value(device_id, value))
+
+    def close(self):
+        if self.bridge:
+            self.submit(self.bridge.close())
+        self.loop.call_soon_threadsafe(self.loop.stop)
+
+
 class LutronMenubarApp(rumps.App):
     def __init__(self):
         super().__init__("💡", quit_button=None)
-        self.bridge = None
+        self._bridge_thread = None
         self.devices = {}
-        self.loop = None
-        self._thread = None
         self._needs_menu_rebuild = False
         self._state = "loading"
         self._build_loading_menu()
-        self._start_bridge()
+        threading.Thread(target=self._connect, daemon=True).start()
 
     @rumps.timer(1)
     def _check_rebuild(self, _):
@@ -129,63 +155,51 @@ class LutronMenubarApp(rumps.App):
         self.menu.add(rumps.MenuItem("Refresh", callback=self._retry))
         self.menu.add(rumps.MenuItem("Quit", callback=self._quit))
 
-    def _start_bridge(self):
-        self._thread = threading.Thread(target=self._connect, daemon=True)
-        self._thread.start()
-
     def _connect(self):
-        print("[DEBUG] Checking bridge reachability...")
         if not is_bridge_reachable():
-            print("[DEBUG] Bridge not reachable")
             self._request_rebuild("offline")
             return
 
-        print("[DEBUG] Bridge reachable, connecting...")
-        self.loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(self.loop)
-
-        async def connect():
-            self.bridge = Smartbridge.create_tls(
-                BRIDGE_HOST,
-                str(CERTS_DIR / "caseta.key"),
-                str(CERTS_DIR / "caseta.crt"),
-                str(CERTS_DIR / "caseta-bridge.crt"),
-            )
-            await self.bridge.connect()
-            self.devices = self.bridge.get_devices()
-
-        self.loop.run_until_complete(connect())
-        print(f"[DEBUG] Connected, found {len(self.devices)} devices")
-        self._request_rebuild("connected")
+        try:
+            self._bridge_thread = BridgeThread()
+            self._bridge_thread.start()
+            self._bridge_thread.connect()
+            self.devices = self._bridge_thread.get_devices()
+            self._request_rebuild("connected")
+        except Exception as e:
+            print(f"[ERROR] Connection failed: {e}")
+            self._request_rebuild("offline")
 
     def _toggle(self, device_id, currently_on):
         def run():
-            async def do():
+            try:
                 if currently_on:
-                    await self.bridge.turn_off(device_id)
+                    self._bridge_thread.turn_off(device_id)
                 else:
-                    await self.bridge.turn_on(device_id)
-                self.devices = self.bridge.get_devices()
-            self.loop.run_until_complete(do())
-            self._request_rebuild("connected")
+                    self._bridge_thread.turn_on(device_id)
+                self.devices = self._bridge_thread.get_devices()
+                self._request_rebuild("connected")
+            except Exception as e:
+                print(f"[ERROR] Toggle failed: {e}")
         threading.Thread(target=run, daemon=True).start()
 
     def _set_level(self, device_id, level):
         def run():
-            async def do():
-                await self.bridge.set_value(device_id, level)
-                self.devices = self.bridge.get_devices()
-            self.loop.run_until_complete(do())
-            self._request_rebuild("connected")
+            try:
+                self._bridge_thread.set_value(device_id, level)
+                self.devices = self._bridge_thread.get_devices()
+                self._request_rebuild("connected")
+            except Exception as e:
+                print(f"[ERROR] Set level failed: {e}")
         threading.Thread(target=run, daemon=True).start()
 
     def _retry(self, _):
         self._build_loading_menu()
-        self._start_bridge()
+        threading.Thread(target=self._connect, daemon=True).start()
 
     def _quit(self, _):
-        if self.bridge and self.loop:
-            self.loop.run_until_complete(self.bridge.close())
+        if self._bridge_thread:
+            self._bridge_thread.close()
         rumps.quit_application()
 
 
