@@ -1,6 +1,7 @@
+import time
 import arxiv
 from datetime import datetime, timedelta
-from config import TOPICS, MAX_RESULTS_PER_QUERY, ELITE_AUTHORS, ELITE_INSTITUTIONS
+from config import TOPICS, MAX_RESULTS_PER_QUERY, ELITE_AUTHORS, ELITE_INSTITUTIONS, USER_WORK_KEYWORDS
 
 
 def fetch_papers(days_back=7, topic_filter=None):
@@ -10,6 +11,8 @@ def fetch_papers(days_back=7, topic_filter=None):
 
     topics = TOPICS if topic_filter is None else {k: v for k, v in TOPICS.items() if k in topic_filter}
 
+    client = arxiv.Client(page_size=MAX_RESULTS_PER_QUERY, delay_seconds=4, num_retries=5)
+
     for topic, queries in topics.items():
         for query_str in queries:
             search = arxiv.Search(
@@ -18,8 +21,12 @@ def fetch_papers(days_back=7, topic_filter=None):
                 sort_by=arxiv.SortCriterion.SubmittedDate,
                 sort_order=arxiv.SortOrder.Descending,
             )
-            client = arxiv.Client()
-            for result in client.results(search):
+            try:
+                results = list(client.results(search))
+            except Exception:
+                time.sleep(10)
+                continue
+            for result in results:
                 if result.published.replace(tzinfo=None) < cutoff.replace(tzinfo=None):
                     continue
                 paper_id = result.entry_id.split("/")[-1]
@@ -67,6 +74,18 @@ def score_paper(paper):
 
     if len(paper["authors"]) <= 6:
         score += 0.5
+
+    # Relevance boost: papers matching user's own research interests
+    relevance_hits = 0
+    for keyword in USER_WORK_KEYWORDS:
+        if keyword.lower() in abstract_lower:
+            relevance_hits += 1
+    if relevance_hits >= 3:
+        score += 3.0
+    elif relevance_hits >= 2:
+        score += 2.0
+    elif relevance_hits >= 1:
+        score += 1.0
 
     return score
 

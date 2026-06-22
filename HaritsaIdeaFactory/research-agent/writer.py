@@ -44,6 +44,22 @@ pdf: {paper['pdf_url']}
 - Categories: {', '.join(paper['categories'])}
 - Matched topics: {', '.join(paper['topics'])}
 """
+
+    # Add seminal references section if available
+    seminal_refs = paper.get("seminal_references", [])
+    if seminal_refs:
+        md += "\n## Seminal Referenced Papers\n\n"
+        for ref in seminal_refs:
+            ref_authors = ", ".join(ref["authors"][:3]) if ref["authors"] else "Unknown"
+            year_str = f" ({ref['year']})" if ref.get("year") else ""
+            cite_str = f" — {ref['citation_count']:,} citations" if ref.get("citation_count") else ""
+            if ref.get("arxiv_url"):
+                md += f"- **[{ref['title']}]({ref['arxiv_url']})**{year_str}{cite_str}\n"
+                md += f"  - {ref_authors}\n"
+            else:
+                md += f"- **{ref['title']}**{year_str}{cite_str}\n"
+                md += f"  - {ref_authors}\n"
+
     return md
 
 
@@ -74,6 +90,26 @@ def write_papers_to_vault(papers, run_label=None):
         digest_lines.append(
             f"| {i} | {paper['score']:.1f} | [[{filename[:-3]}\\|{safe_title}]] | {topics_str} |\n"
         )
+
+    # Add seminal references summary to digest
+    digest_lines.append("\n---\n\n## Seminal Papers Referenced\n\n")
+    digest_lines.append("Key older papers cited by this week's top papers:\n\n")
+    seen_refs = set()
+    for paper in papers:
+        for ref in paper.get("seminal_references", []):
+            ref_key = ref["title"]
+            if ref_key in seen_refs:
+                continue
+            seen_refs.add(ref_key)
+            year_str = f" ({ref['year']})" if ref.get("year") else ""
+            cite_str = f" [{ref['citation_count']:,} cites]" if ref.get("citation_count") else ""
+            if ref.get("arxiv_url"):
+                digest_lines.append(f"- **[{ref['title']}]({ref['arxiv_url']})**{year_str}{cite_str}\n")
+            else:
+                digest_lines.append(f"- **{ref['title']}**{year_str}{cite_str}\n")
+
+    if not seen_refs:
+        digest_lines.append("_No reference data available from Semantic Scholar._\n")
 
     digest_path = VAULT_PATH / f"digest-{run_label}.md"
     digest_path.write_text("".join(digest_lines))
