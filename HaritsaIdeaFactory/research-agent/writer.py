@@ -64,27 +64,43 @@ pdf: {paper['pdf_url']}
 
 
 def write_papers_to_vault(papers, run_label=None):
-    """Write ranked papers as individual notes + a digest note."""
+    """Write ranked papers as individual notes + append to digest if same day."""
     VAULT_PATH.mkdir(parents=True, exist_ok=True)
 
     if run_label is None:
         run_label = datetime.now().strftime("%Y-%m-%d")
 
-    digest_lines = [
-        f"# Research Digest — {run_label}\n",
-        f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M')}\n",
-        f"Papers found: {len(papers)}\n\n",
-        "| # | Score | Title | Topics |\n",
-        "|---|-------|-------|--------|\n",
-    ]
+    digest_path = VAULT_PATH / f"digest-{run_label}.md"
+    run_time = datetime.now().strftime("%H:%M")
+
+    # If digest already exists for today, append a new section
+    if digest_path.exists():
+        existing = digest_path.read_text()
+        digest_lines = [
+            existing.rstrip() + "\n\n",
+            f"---\n\n",
+            f"## Run at {run_time}\n\n",
+            f"Papers found: {len(papers)}\n\n",
+            "| # | Score | Title | Topics |\n",
+            "|---|-------|-------|--------|\n",
+        ]
+    else:
+        digest_lines = [
+            f"# Research Digest — {run_label}\n\n",
+            f"## Run at {run_time}\n\n",
+            f"Papers found: {len(papers)}\n\n",
+            "| # | Score | Title | Topics |\n",
+            "|---|-------|-------|--------|\n",
+        ]
 
     for i, paper in enumerate(papers, 1):
         safe_title = paper["title"].replace("/", "-").replace(":", " -")[:80]
         filename = f"{paper['id'].replace('/', '_')}.md"
         filepath = VAULT_PATH / filename
 
-        md_content = paper_to_markdown(paper)
-        filepath.write_text(md_content)
+        if not filepath.exists():
+            md_content = paper_to_markdown(paper)
+            filepath.write_text(md_content)
 
         topics_str = ", ".join(paper["topics"])
         digest_lines.append(
@@ -111,7 +127,6 @@ def write_papers_to_vault(papers, run_label=None):
     if not seen_refs:
         digest_lines.append("_No reference data available from Semantic Scholar._\n")
 
-    digest_path = VAULT_PATH / f"digest-{run_label}.md"
     digest_path.write_text("".join(digest_lines))
 
     return digest_path
